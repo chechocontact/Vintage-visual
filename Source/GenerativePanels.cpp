@@ -325,7 +325,7 @@ public:
 
             if (cooldown == 0 && flux > 0.07f && bands.low > 0.25f)
             {
-                auto* slot = std::find_if (rings.begin(), rings.end(), [] (const Ring& r) { return ! r.active; });
+                auto slot = std::find_if (rings.begin(), rings.end(), [] (const Ring& r) { return ! r.active; });
                 if (slot == rings.end()) slot = std::max_element (rings.begin(), rings.end(), [] (const Ring& a, const Ring& b) { return a.age < b.age; });
                 *slot = { true, 0, bands.low };
                 cooldown = 5;
