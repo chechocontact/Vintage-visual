@@ -1085,7 +1085,7 @@ static void testUserConfig()
         if (save != nullptr)
         {
             CHECK (save->getButtonText() == "Save" && ! file.existsAsFile());
-            save->triggerClick();
+            save->onClick();  // not triggerClick(): that one is asynchronous and these tests do not run the message loop
             CHECK (file.existsAsFile());
             CHECK (save->getButtonText() == "Saved");
             for (int i = 0; i < 80; ++i) view.refreshNow();
