@@ -16,9 +16,10 @@ Spectrum · Spectrogram (dos resoluciones de análisis) · Waveform · VU · LUF
 **Interfaz**
 - Ventana del DAW redimensionable, o **ventana flotante sin bordes** (botón *Float*).
 - **PIN**: siempre encima de todo.
-- **DOCK**: franja en la parte superior de la pantalla.
+- **DOCK**: franja en la parte superior de la pantalla con de **1 a 8 visualizadores** a elegir. Se reordenan arrastrando uno sobre otro, el número se elige en el desplegable de la izquierda y la **altura es ajustable** (mínimo 150 px; se recuerda).
 - **FULL**: pantalla completa con una cuadrícula de módulos (espectrograma, loudness, forma de onda, estéreo y niveles).
-- Paneles múltiples: 1, 2, 3 o 4 a elección; cada hueco elige su visualizador y se pueden **arrastrar unos sobre otros para intercambiarlos**.
+- Paneles múltiples: 1, 2, 3 o 4 a elección. Cada hueco tiene un pequeño botón **"..."** (aparece al pasar el puntero, o con el teclado) que abre la lista de visualizadores, y se pueden **arrastrar unos sobre otros para intercambiarlos**.
+- **Save**: guarda tu configuración (skin, objetivo, layouts, paneles, DOCK, tamaño y PIN). Las **instancias nuevas** del plugin se abren ya configuradas; un proyecto guardado conserva la suya. Se guarda en `%APPDATA%\Vintage Visual\config.xml` (para volver a los valores de fábrica, borra ese archivo).
 - 9 skins, con un menú que muestra cada una en sus colores: Vintage (por defecto), Night, Day, Nebula, Phosphor, Blueprint, Synthwave, Pink y Celeste.
 
 ## Uso
@@ -51,8 +52,8 @@ Para el instalador: Inno Setup 6 y `installer/VintageVisual.iss` (el CI lo hace 
 
 | Suite | Qué comprueba |
 |---|---|
-| `CoreTests` | Medición (valores de referencia EBU/ITU), FFT, niveles, afinador, geometría de cuadrículas y contraste WCAG de cada skin. Sin JUCE. |
-| `PluginTests` | Procesador, estado guardado, editor, ventana flotante (PIN/DOCK/FULL), paneles, intercambio de paneles, rendimiento, ausencia de asignaciones de memoria en el hilo de audio y fugas. |
+| `CoreTests` | Medición (valores de referencia EBU/ITU), FFT, niveles, afinador, geometría de cuadrículas y del DOCK, y contraste WCAG de cada skin. Sin JUCE. |
+| `PluginTests` | Procesador, estado guardado, editor, ventana flotante (PIN/DOCK/FULL), DOCK con 1–8 paneles y altura ajustable, configuración guardada (guardar, instancia nueva, archivo dañado), paneles, intercambio de paneles, rendimiento, ausencia de asignaciones de memoria en el hilo de audio y fugas. |
 
 Variables de entorno de `PluginTests` (solo Linux/X11 con gestor de ventanas para las que abren ventanas):
 `VV_SNAPSHOT_DIR=/ruta` escribe capturas PNG; `VV_LEAK_DIAG=1` y `VV_LEAK_SCENARIO=1` ayudan a localizar fugas.
@@ -72,7 +73,8 @@ Resultados de rendimiento y método: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md
 
 ## Limitaciones conocidas
 
-- **DOCK** es una franja siempre encima; no reserva espacio en el escritorio (las ventanas maximizadas pasan por debajo).
+- **DOCK** es una franja siempre encima; no reserva espacio en el escritorio (las ventanas maximizadas pasan por debajo). Con la altura mínima (150 px) el Goniómetro se ve pequeño: agranda la franja si lo necesitas.
+- La configuración guardada es **una por usuario** (no hay presets con nombre).
 - El plugin mide el audio que recibe en el canal donde se inserta; no captura el audio del sistema.
 - Solo estéreo.
 - Interfaz solo en inglés.

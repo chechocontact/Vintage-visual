@@ -7,11 +7,15 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <algorithm>
 #include <array>
 #include <functional>
 
 namespace vintagevisual
 {
+// Slots a MeterView can hold at once: the normal layouts use up to 5, the DOCK strip up to 8.
+constexpr int maxViewSlots = std::max (maxSlots, maxDockSlots);
+
 enum class WindowAction
 {
     togglePin,
@@ -55,6 +59,7 @@ public:
     int getActiveSlotCount() const noexcept;
     int getSlotKind (int slot) const noexcept { return appliedKinds[(size_t) slot]; }
     void swapSlots (int a, int b);
+    void setSlotKind (int slot, int kind);  // what the "..." menu does
 
     void paint (juce::Graphics&) override;
     void paintOverChildren (juce::Graphics&) override;
@@ -69,6 +74,11 @@ private:
     void timerCallback() override { refreshNow(); }
     void applySkin (int index);
     void showSkinMenu();
+    void showSlotMenu (int slot);
+    void updateSlotButtons();
+    void saveConfiguration();
+    void placeSlot (int slot, juce::Rectangle<int> rect, int panelInset);
+    int layoutKey() const;
     void syncWindowBackground();
     void updateVisibility();
     void rebuildSlots();
@@ -94,17 +104,21 @@ private:
     juce::TooltipWindow tooltipWindow { this };
     juce::ComponentDragger dragger;
 
-    juce::ComboBox layoutBox, targetBox;
-    std::array<juce::ComboBox, maxSlots> slotBoxes;
-    std::array<std::unique_ptr<VisualizerPanel>, maxSlots> panels;
-    std::array<int, maxSlots> appliedKinds;
-    std::array<juce::Rectangle<int>, maxSlots> slotBounds;
+    juce::ComboBox layoutBox, targetBox, dockCountBox;
+    // Small "..." buttons, one per slot. They fade in only while the pointer is over their slot (or they have focus).
+    std::array<juce::TextButton, maxViewSlots> slotButtons;
+    std::array<float, maxViewSlots> slotButtonAlpha;
+    std::array<std::unique_ptr<VisualizerPanel>, maxViewSlots> panels;
+    std::array<int, maxViewSlots> appliedKinds;
+    std::array<juce::Rectangle<int>, maxViewSlots> slotBounds;
     int appliedPreset = -1;
+    int menuOpenSlot = -1;
+    int saveFeedbackTicks = 0;
 
-    juce::TextButton skinButton { "Skin" }, resetButton { "Reset" }, detachButton { "Float" };
+    juce::TextButton skinButton { "Skin" }, resetButton { "Reset" }, detachButton { "Float" }, saveButton { "Save" };
     juce::TextButton pinButton { "PIN" }, dockButton { "DOCK" }, fullButton { "FULL" }, closeButton { "Close" };
 
-    juce::Rectangle<int> titleArea, gridArea, readoutArea, deltaArea, footerArea, compactArea;
+    juce::Rectangle<int> titleArea, gridArea, readoutArea, deltaArea, footerArea;
     LoudnessReadings readings;
     std::uint32_t lastSerial = 0;
     int appliedSkin = -1;

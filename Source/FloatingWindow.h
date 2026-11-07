@@ -8,12 +8,13 @@
 namespace vintagevisual
 {
 // Borderless, resizable top-level window that hosts a MeterView outside the DAW's editor frame.
-// PIN: always on top. DOCK: thin strip across the top of the display. FULL: full screen.
+// PIN: always on top. DOCK: strip across the top of the display (full width, resizable height, never below
+// ui::dockMinHeight) holding up to 8 visualisers. FULL: full screen.
 // Message thread only.
 class FloatingWindow final : public juce::ResizableWindow
 {
 public:
-    static constexpr int stripHeight = 64;
+    static constexpr int stripHeight = ui::dockDefaultHeight;  // default and minimum height of the DOCK strip
 
     FloatingWindow (VintageVisualProcessor&, std::function<void()> requestClose);
     ~FloatingWindow() override;
@@ -30,6 +31,7 @@ public:
     void userTriedToCloseWindow() override;
 
 private:
+    void resized() override;
     void handleAction (WindowAction);
     void syncState();
     void applyNormalLimits();

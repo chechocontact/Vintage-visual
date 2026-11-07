@@ -31,6 +31,15 @@ void FloatingWindow::applyNormalLimits()
     setResizeLimits (ui::minWidth, ui::minHeight, ui::maxWidth, ui::maxHeight);
 }
 
+void FloatingWindow::resized()
+{
+    juce::ResizableWindow::resized();
+
+    // While docked, a resize can only be the user changing the strip's height: remember it.
+    if (docked && getHeight() > 0)
+        owner.dockHeight.store (std::clamp (getHeight(), ui::dockMinHeight, ui::dockMaxHeight));
+}
+
 void FloatingWindow::userTriedToCloseWindow()
 {
     if (closeRequested) closeRequested();
@@ -78,8 +87,10 @@ void FloatingWindow::setDocked (bool shouldDock)
         if (display == nullptr) display = displays.getPrimaryDisplay();
         const auto area = display != nullptr ? display->userBounds.toNearestInt() : getScreenBounds();  // excludes the taskbar
 
-        setResizeLimits (ui::minWidth, stripHeight, std::max (ui::maxWidth, area.getWidth()), stripHeight);
-        setBounds (area.getX(), area.getY(), area.getWidth(), stripHeight);
+        // The strip keeps the height the user last gave it (remembered by the processor).
+        const int height = std::clamp (owner.dockHeight.load(), ui::dockMinHeight, ui::dockMaxHeight);
+        setResizeLimits (ui::minWidth, ui::dockMinHeight, std::max (ui::maxWidth, area.getWidth()), ui::dockMaxHeight);
+        setBounds (area.getX(), area.getY(), area.getWidth(), height);
         view->setCompact (true);
     }
     else

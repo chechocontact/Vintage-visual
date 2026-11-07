@@ -20,6 +20,8 @@ namespace ui
 {
 constexpr int minWidth = 560, minHeight = 300, maxWidth = 3000, maxHeight = 2000;
 constexpr int defaultWidth = 760, defaultHeight = 420;
+// DOCK strip: resizable in height, never smaller than the minimum.
+constexpr int dockMinHeight = 150, dockMaxHeight = 480, dockDefaultHeight = dockMinHeight;
 } // namespace ui
 
 class FloatingWindow;
@@ -28,7 +30,7 @@ class FloatingWindow;
 class VintageVisualProcessor final : public juce::AudioProcessor
 {
 public:
-    static constexpr int stateVersion = 1;
+    static constexpr int stateVersion = 2;  // 2: adds the DOCK settings (older states load unchanged)
 
     VintageVisualProcessor();
     ~VintageVisualProcessor() override;
@@ -56,6 +58,14 @@ public:
 
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
+
+    // ---- User configuration (message thread) ----
+    // One saved configuration per user, kept in a small XML file. A NEW plug-in instance starts from it;
+    // a project restored by the DAW keeps its own saved state (setStateInformation runs after construction).
+    bool saveUserConfig() const;
+    bool loadUserConfig();
+    static juce::File getUserConfigFile();
+    static void setConfigFileOverride (const juce::File& file);  // tests: keeps them away from the real file
 
     // ---- Message thread API ----
     // Raw single-consumer pull. UI code should use refreshReadings() so several views can share one stream.
@@ -98,9 +108,16 @@ public:
     std::atomic<int>& panelIndex = slotPanels[0];
     std::atomic<int> layoutPreset { 0 };  // LayoutPreset, one of the first numUserLayouts
     std::atomic<bool> pinned { true };
+    // DOCK strip: which panel each of the (up to 8) slots shows, how many are shown, and the strip's height.
+    std::array<std::atomic<int>, maxDockSlots> dockSlotPanels;
+    std::atomic<int> dockCount { 3 };
+    std::atomic<int> dockHeight { ui::dockDefaultHeight };
     std::atomic<int> uiWidth { ui::defaultWidth }, uiHeight { ui::defaultHeight };
 
 private:
+    std::unique_ptr<juce::XmlElement> createStateXml() const;
+    void applyStateXml (const juce::XmlElement&);
+
     LoudnessMeter meter;
     AudioHistory history;
     TripleBuffer<LoudnessReadings> readingsMailbox;

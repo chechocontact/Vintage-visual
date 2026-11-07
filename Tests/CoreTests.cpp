@@ -567,6 +567,41 @@ static void testPitchDetector()
     CHECK_NEAR (describeNote (432.0, 432.0).cents, 0.0, 0.001);  // alternative reference pitch
 }
 
+static void testDockLayouts()
+{
+    CHECK (maxDockSlots == 8);
+
+    for (int count = 1; count <= maxDockSlots; ++count)
+    {
+        for (int width : { 560, 1000, 1366, 1920, 3840 })
+        {
+            const int gap = 8, height = 142;
+            const auto slots = computeDockSlots (count, width, height, gap);
+            int expectedX = 0, minW = 1 << 30, maxW = 0;
+
+            for (int i = 0; i < count; ++i)
+            {
+                const auto& a = slots[(size_t) i];
+                CHECK (a.x == expectedX);          // contiguous, in order, `gap` apart
+                CHECK (a.y == 0 && a.h == height);
+                CHECK (a.w > 0);
+                minW = std::min (minW, a.w);
+                maxW = std::max (maxW, a.w);
+                expectedX = a.x + a.w + gap;
+            }
+
+            CHECK (expectedX - gap == width);      // the row ends exactly at the right edge
+            CHECK (maxW - minW <= 1);              // equal widths (to the pixel)
+        }
+    }
+
+    // Out-of-range counts are clamped.
+    const auto zero = computeDockSlots (0, 800, 100, 8);
+    CHECK (zero[0].w == 800 && zero[1].w == 0);
+    const auto many = computeDockSlots (99, 800, 100, 8);
+    CHECK (many[7].w > 0 && many[7].x + many[7].w == 800);
+}
+
 static void testLayouts()
 {
     const LayoutPreset presets[] = { LayoutPreset::single, LayoutPreset::twoColumns, LayoutPreset::threeSplit, LayoutPreset::quad, LayoutPreset::full5 };
@@ -620,6 +655,7 @@ int main()
     testSpectrumAnalyzer();
     testLevelTracker();
     testLayouts();
+    testDockLayouts();
     testDualSpectrum();
     testPitchDetector();
 

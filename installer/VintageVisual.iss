@@ -1,9 +1,9 @@
 ; Inno Setup 6 script for Vintage Visual (VST3, Windows 11 x64).
-; Build:  ISCC.exe /DAppVersion=0.1.0 /DBuildDir="C:\path\to\VintageVisual_artefacts\Release\VST3" installer\VintageVisual.iss
+; Build:  ISCC.exe /DAppVersion=0.2.0 /DBuildDir="C:\path\to\VintageVisual_artefacts\Release\VST3" installer\VintageVisual.iss
 ; The version comes from CMakeLists.txt (single source of truth); CI passes it in.
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.2.0"
 #endif
 #ifndef BuildDir
   #define BuildDir "..\build\VintageVisual_artefacts\Release\VST3"

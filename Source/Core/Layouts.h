@@ -7,6 +7,9 @@ namespace vintagevisual
 {
 constexpr int maxSlots = 5;
 
+// The DOCK strip is a single row of up to this many panels (independent from the normal layouts above).
+constexpr int maxDockSlots = 8;
+
 struct SlotRect
 {
     int x = 0, y = 0, w = 0, h = 0;
@@ -114,6 +117,27 @@ inline std::array<SlotRect, maxSlots> computeSlots (LayoutPreset preset, int wid
             s[4] = { rx + a + gap, h1 + gap + h2 + gap, b, h3 };
             break;
         }
+    }
+
+    return s;
+}
+
+// DOCK strip: `count` (1..maxDockSlots) panels side by side, each as tall as the area, separated by `gap` pixels.
+// Widths differ by at most one pixel and the row always ends exactly at `width`. Pure geometry (no JUCE).
+inline std::array<SlotRect, maxDockSlots> computeDockSlots (int count, int width, int height, int gap) noexcept
+{
+    std::array<SlotRect, maxDockSlots> s {};
+    const int n = std::clamp (count, 1, maxDockSlots);
+    const int W = std::max (n, width), H = std::max (1, height);
+    const int usable = std::max (n, W - gap * (n - 1));
+    const int base = usable / n, extra = usable % n;
+
+    int x = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        const int w = base + (i < extra ? 1 : 0);
+        s[(size_t) i] = { x, 0, w, H };
+        x += w + gap;
     }
 
     return s;

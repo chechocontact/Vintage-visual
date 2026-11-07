@@ -201,7 +201,7 @@ static void testEditor()
 
         juce::Array<juce::Component*> controls;
         collectControls (*editor, controls);
-        CHECK (controls.size() == 6);  // layout, panel 1, skin, target, reset, float
+        CHECK (controls.size() == 7);  // layout, panel 1, skin, target, reset, float, save
 
         juce::Array<juce::Rectangle<int>> boxes;
         for (auto* c : controls)
@@ -257,7 +257,7 @@ static void testFloatingWindow()
     // Controls of the floating view are labelled, reachable and do not overlap.
     juce::Array<juce::Component*> controls;
     collectControls (*w, controls);
-    CHECK (controls.size() == 9);  // layout, panel 1, skin, target, reset, pin, dock, full, close
+    CHECK (controls.size() == 10);  // layout, panel 1, skin, target, reset, pin, dock, full, close, save
     for (auto* c : controls)
     {
         CHECK (c->getTitle().isNotEmpty());
@@ -281,7 +281,7 @@ static void testFloatingWindow()
 
     juce::Array<juce::Component*> stripControls;
     collectControls (*w, stripControls);
-    CHECK (stripControls.size() == 3);  // pin, dock, close
+    CHECK (stripControls.size() == 5 + p.dockCount.load());  // panel count, save, pin, dock, close + one "..." per panel
     for (auto* c : stripControls)
         CHECK (w->getLocalBounds().contains (w->getLocalArea (c->getParentComponent(), c->getBounds())));
 
@@ -354,16 +354,12 @@ static void testPanels()
 
         juce::Array<juce::Component*> controls;
         collectControls (*e, controls);
-        CHECK (controls.size() == 6);
+        CHECK (controls.size() == 7);  // layout, panel 1, skin, target, reset, float, save
         for (auto* c : controls) CHECK (e->getLocalBounds().contains (e->getLocalArea (c->getParentComponent(), c->getBounds())));
 
-        // Switching in the UI is remembered by the processor.
-        for (auto* c : controls)
-            if (auto* box = dynamic_cast<juce::ComboBox*> (c); box != nullptr && box->getTitle() == "Panel 1")
-            {
-                box->setSelectedId (((panel + 1) % numPanels) + 1, juce::sendNotificationSync);
-                CHECK (p.panelIndex.load() == (panel + 1) % numPanels);
-            }
+        // Choosing a visualiser from the "..." menu is remembered by the processor.
+        editor.getView().setSlotKind (0, (panel + 1) % numPanels);
+        CHECK (p.panelIndex.load() == (panel + 1) % numPanels);
     }
 
     // The choice survives save/restore and is clamped.
@@ -838,6 +834,271 @@ static void testFullGrid()
     CHECK (q.layoutPreset.load() == 2 && q.slotPanels[2].load() == 11 && q.fullSlotPanels[4].load() == 13);
 }
 
+static void testDockStrip()
+{
+    VintageVisualProcessor p;
+    p.prepareToPlay (48000.0, 512);
+    juce::AudioBuffer<float> buffer (2, 512);
+    juce::MidiBuffer midi;
+    for (int block = 0; block < 400; ++block) { fillSine (buffer, 48000.0, 1000.0, -12.0, (long long) block * 512); p.processBlock (buffer, midi); }
+
+    p.showFloatingMeter();
+    auto* w = p.getFloatingWindow();
+    CHECK (w != nullptr);
+    if (w == nullptr) return;
+
+    const int normalSlot0 = p.slotPanels[0].load(), fullSlot0 = p.fullSlotPanels[0].load();
+    w->setDocked (true);
+    auto& view = w->getView();
+    CHECK (view.isCompact());
+    view.refreshNow();
+
+    // Default strip: LUFS, spectrum and levels.
+    CHECK (view.getActiveSlotCount() == 3);
+    CHECK (view.getSlotKind (0) == (int) PanelKind::loudness && view.getSlotKind (1) == (int) PanelKind::spectrum && view.getSlotKind (2) == (int) PanelKind::levels);
+
+    // From 1 up to 8 visualisers: each has its own labelled, reachable "..." selector, nothing overlaps or is clipped.
+    for (int count = 1; count <= maxDockSlots; ++count)
+    {
+        p.dockCount = count;
+        view.refreshNow();
+        CHECK (view.getActiveSlotCount() == count);
+
+        juce::Array<juce::Component*> controls;
+        collectControls (*w, controls);
+        juce::Array<juce::Rectangle<int>> boxes;
+        int selectors = 0;
+        for (auto* c : controls)
+        {
+            const auto b = w->getLocalArea (c->getParentComponent(), c->getBounds());
+            CHECK (c->getTitle().isNotEmpty());
+            CHECK (c->getWantsKeyboardFocus());
+            CHECK (w->getLocalBounds().contains (b));
+            for (auto& other : boxes) CHECK (! other.intersects (b));
+            boxes.add (b);
+            if (c->getTitle().startsWith ("Panel ")) ++selectors;
+        }
+        CHECK (selectors == count);
+        CHECK (imageHasContent (w->createComponentSnapshot (w->getLocalBounds())));
+    }
+
+    // Every kind of visualiser can be shown in the strip.
+    p.dockCount = 1;
+    for (int kind = 0; kind < numPanels; ++kind)
+    {
+        p.dockSlotPanels[0] = kind;
+        view.refreshNow();
+        view.refreshNow();
+        CHECK (view.getSlotKind (0) == kind);
+    }
+
+    // The "..." menu choice is stored for the strip only. Out-of-range slots are ignored.
+    p.dockCount = 8;
+    view.refreshNow();
+    view.setSlotKind (2, (int) PanelKind::tuner);
+    CHECK (p.dockSlotPanels[2].load() == (int) PanelKind::tuner && view.getSlotKind (2) == (int) PanelKind::tuner);
+    view.setSlotKind (8, 1);
+    view.setSlotKind (-1, 1);
+    CHECK (p.dockSlotPanels[2].load() == (int) PanelKind::tuner);
+
+    // Dragging one panel onto another swaps them (what the mouse does), anywhere in the row.
+    for (int i = 0; i < maxDockSlots; ++i) p.dockSlotPanels[(size_t) i] = i;
+    view.refreshNow();
+    view.swapSlots (0, 7);
+    CHECK (p.dockSlotPanels[0].load() == 7 && p.dockSlotPanels[7].load() == 0);
+    CHECK (view.getSlotKind (0) == 7 && view.getSlotKind (7) == 0);
+    view.swapSlots (3, 3);
+    view.swapSlots (0, 8);
+    CHECK (p.dockSlotPanels[3].load() == 3);
+
+    // The strip never touches the normal layouts or the FULL grid.
+    CHECK (p.slotPanels[0].load() == normalSlot0 && p.fullSlotPanels[0].load() == fullSlot0);
+
+    // The "..." button opens its menu without crashing (the menu itself needs the message loop).
+    {
+        juce::Array<juce::Component*> controls;
+        collectControls (*w, controls);
+        for (auto* c : controls)
+            if (auto* b = dynamic_cast<juce::TextButton*> (c); b != nullptr && b->getTitle() == "Panel 1 visualizer")
+                b->triggerClick();
+        juce::PopupMenu::dismissAllActiveMenus();
+    }
+
+    // Eight different visualisers at once stay inside the frame budget.
+    {
+        const int kinds[8] = { (int) PanelKind::spectrogram, (int) PanelKind::spectrum, (int) PanelKind::waveform, (int) PanelKind::scope,
+                               (int) PanelKind::goniometer, (int) PanelKind::orb, (int) PanelKind::mandala, (int) PanelKind::signalMap };
+        for (int i = 0; i < 8; ++i) p.dockSlotPanels[(size_t) i] = kinds[i];
+        p.dockCount = 8;
+        view.refreshNow();
+
+        double total = 0.0;
+        constexpr int frames = 40;
+        for (int i = 0; i < frames + 5; ++i)
+        {
+            for (int b = 0; b < 2; ++b) { fillSine (buffer, 48000.0, 997.0, -14.0, (long long) (i * 2 + b) * 512); p.processBlock (buffer, midi); }
+            const auto t0 = Clock::now();
+            view.refreshNow();
+            auto img = w->createComponentSnapshot (w->getLocalBounds());
+            if (i >= 5) total += microsSince (t0) / 1000.0;
+        }
+        const double ms = total / frames;
+        std::printf ("DOCK strip (8 visualisers) at %dx%d: %.2f ms per frame (%.1f %% of one core at 30 Hz)\n", w->getWidth(), w->getHeight(), ms, ms * 3.0);
+        CHECK (ms < 25.0);
+    }
+
+    // The strip is resizable in height, the height is remembered, and it is restored when docking again.
+    const int width = w->getWidth();
+    w->setSize (width, 320);
+    CHECK (w->getHeight() == 320 && p.dockHeight.load() == 320);
+    w->setDocked (false);
+    w->setDocked (true);
+    CHECK (w->getHeight() == 320);
+    CHECK (320 >= ui::dockMinHeight && FloatingWindow::stripHeight == ui::dockMinHeight);
+
+    p.hideFloatingMeter();
+
+    // The strip's settings survive save/restore and are clamped.
+    p.dockCount = 5;
+    p.dockSlotPanels[4] = 12;
+    p.dockHeight = 222;
+    juce::MemoryBlock block;
+    p.getStateInformation (block);
+    VintageVisualProcessor q;
+    q.setStateInformation (block.getData(), (int) block.getSize());
+    CHECK (q.dockCount.load() == 5 && q.dockSlotPanels[4].load() == 12 && q.dockHeight.load() == 222);
+
+    juce::XmlElement wild ("VintageVisual");
+    wild.setAttribute ("version", 2);
+    wild.setAttribute ("dockCount", 99);
+    wild.setAttribute ("dslot0", 77);
+    wild.setAttribute ("dockHeight", 5);
+    juce::MemoryBlock wildBlock;
+    VintageVisualProcessor::copyXmlToBinary (wild, wildBlock);
+    q.setStateInformation (wildBlock.getData(), (int) wildBlock.getSize());
+    CHECK (q.dockCount.load() == maxDockSlots && q.dockSlotPanels[0].load() == numPanels - 1 && q.dockHeight.load() == ui::dockMinHeight);
+
+    // A state saved by 0.1.0 (no strip settings) still loads and leaves the strip as it was.
+    juce::XmlElement old ("VintageVisual");
+    old.setAttribute ("version", 1);
+    old.setAttribute ("skin", 2);
+    juce::MemoryBlock oldBlock;
+    VintageVisualProcessor::copyXmlToBinary (old, oldBlock);
+    q.setStateInformation (oldBlock.getData(), (int) oldBlock.getSize());
+    CHECK (q.skinIndex.load() == 2 && q.dockCount.load() == maxDockSlots);
+}
+
+static void testUserConfig()
+{
+    const auto file = VintageVisualProcessor::getUserConfigFile();
+    file.deleteFile();
+
+    // No saved configuration: a new instance starts from the factory defaults.
+    {
+        VintageVisualProcessor fresh;
+        CHECK (! fresh.loadUserConfig());
+        CHECK (fresh.skinIndex.load() == 0 && fresh.targetLufs.load() == -14.0f && fresh.layoutPreset.load() == 0 && fresh.dockCount.load() == 3);
+    }
+
+    // The user builds a configuration and saves it.
+    {
+        VintageVisualProcessor a;
+        a.skinIndex = 5;
+        a.targetLufs = -23.0f;
+        a.layoutPreset = 3;
+        a.slotPanels[2] = 11;
+        a.fullSlotPanels[4] = 13;
+        a.dockCount = 6;
+        a.dockSlotPanels[5] = 9;
+        a.dockHeight = 260;
+        a.pinned = false;
+        a.uiWidth = 900;
+        a.uiHeight = 500;
+        CHECK (a.saveUserConfig());
+        CHECK (file.existsAsFile());
+    }
+
+    // A NEW instance opens already configured.
+    {
+        VintageVisualProcessor b;
+        CHECK (b.skinIndex.load() == 5 && b.targetLufs.load() == -23.0f && b.layoutPreset.load() == 3);
+        CHECK (b.slotPanels[2].load() == 11 && b.fullSlotPanels[4].load() == 13);
+        CHECK (b.dockCount.load() == 6 && b.dockSlotPanels[5].load() == 9 && b.dockHeight.load() == 260);
+        CHECK (! b.pinned.load() && b.uiWidth.load() == 900 && b.uiHeight.load() == 500);
+    }
+
+    // A project restored by the DAW keeps ITS state, not the saved configuration.
+    {
+        VintageVisualProcessor source;
+        source.skinIndex = 1;
+        source.dockCount = 2;
+        juce::MemoryBlock block;
+        source.getStateInformation (block);
+
+        VintageVisualProcessor project;  // starts from the saved configuration (skin 5)...
+        CHECK (project.skinIndex.load() == 5);
+        project.setStateInformation (block.getData(), (int) block.getSize());  // ...then the host restores the project
+        CHECK (project.skinIndex.load() == 1 && project.dockCount.load() == 2);
+    }
+
+    // Saving again replaces the file; no temporary file is left behind.
+    {
+        VintageVisualProcessor c;
+        c.skinIndex = 7;
+        CHECK (c.saveUserConfig());
+        VintageVisualProcessor d;
+        CHECK (d.skinIndex.load() == 7);
+        CHECK (file.getParentDirectory().getNumberOfChildFiles (juce::File::findFiles, "*") == 1);
+    }
+
+    // A damaged, foreign, newer or out-of-range file never breaks a new instance.
+    file.replaceWithText ("this is not xml");
+    { VintageVisualProcessor e; CHECK (e.skinIndex.load() == 0 && ! e.loadUserConfig()); }
+
+    file.replaceWithText ("<SomethingElse skin=\"3\"/>");
+    { VintageVisualProcessor e; CHECK (e.skinIndex.load() == 0); }
+
+    file.replaceWithText ("<VintageVisual version=\"99\" skin=\"3\"/>");
+    { VintageVisualProcessor e; CHECK (e.skinIndex.load() == 0); }
+
+    file.replaceWithText ("<VintageVisual version=\"2\" skin=\"77\" dockCount=\"99\" target=\"500\"/>");
+    { VintageVisualProcessor e; CHECK (e.skinIndex.load() == numSkins - 1 && e.dockCount.load() == maxDockSlots && e.targetLufs.load() == 0.0f); }
+
+    // The Save button: writes the file, confirms, and goes back to its normal label.
+    file.deleteFile();
+    {
+        VintageVisualProcessor p;
+        p.prepareToPlay (48000.0, 512);
+        p.skinIndex = 4;
+        std::unique_ptr<juce::AudioProcessorEditor> e (p.createEditor());
+        e->setSize (760, 420);
+        auto& view = static_cast<VintageVisualEditor&> (*e).getView();
+
+        juce::Array<juce::Component*> controls;
+        collectControls (*e, controls);
+        juce::TextButton* save = nullptr;
+        for (auto* c : controls)
+            if (auto* b = dynamic_cast<juce::TextButton*> (c); b != nullptr && b->getTitle() == "Save configuration")
+                save = b;
+
+        CHECK (save != nullptr);
+        if (save != nullptr)
+        {
+            CHECK (save->getButtonText() == "Save" && ! file.existsAsFile());
+            save->triggerClick();
+            CHECK (file.existsAsFile());
+            CHECK (save->getButtonText() == "Saved");
+            for (int i = 0; i < 80; ++i) view.refreshNow();
+            CHECK (save->getButtonText() == "Save");
+
+            VintageVisualProcessor next;
+            CHECK (next.skinIndex.load() == 4);
+        }
+    }
+
+    file.deleteFile();
+}
+
 // Optional: VV_LEAK_DIAG=1 prints heap growth per cycle for each UI scenario, to locate a leak.
 static void diagnoseGrowth()
 {
@@ -1028,6 +1289,12 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
 
+    // Keep every test away from the user's real saved configuration.
+    VintageVisualProcessor::setConfigFileOverride (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                                       .getChildFile ("VintageVisual-tests")
+                                                       .getChildFile ("config.xml"));
+    VintageVisualProcessor::getUserConfigFile().deleteFile();
+
     if (juce::SystemStats::getEnvironmentVariable ("VV_LEAK_SCENARIO", {}).isNotEmpty())
     {
         // Small, repeatable scenario for Valgrind: leaks that repeat 15 times stand out.
@@ -1074,11 +1341,15 @@ int main()
     testPanels();
     testGridSlotsAndSkins();
     testFullGrid();
+    testDockStrip();
+    testUserConfig();
     testNoAllocationInProcessBlock();
     testAudioThreadPerformance();
     testUiPerformance();
     testStress();
     testNoLeaksOnOpenClose();
+
+    VintageVisualProcessor::getUserConfigFile().getParentDirectory().deleteRecursively();
 
     std::printf ("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

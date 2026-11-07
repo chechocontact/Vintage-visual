@@ -18,7 +18,7 @@ constexpr std::array<Target, 4> targets { { { "-14 LUFS  Streaming", -14.0f },
                                             { "-23 LUFS  EBU R128", -23.0f },
                                             { "-9 LUFS  Club", -9.0f } } };
 
-constexpr int headerHeight = theme::controlHeight + theme::space::xs;
+constexpr int slotButtonWidth = 34, slotButtonHeight = 20;  // the small "..." selector
 constexpr int readoutHeight = 44;
 
 juce::String formatValue (double v, int decimals = 1)
@@ -100,6 +100,7 @@ MeterView::MeterView (VintageVisualProcessor& p, Mode m)
     : owner (p), mode (m), palette (skins[0].colors)
 {
     appliedKinds.fill (-1);
+    slotButtonAlpha.fill (0.0f);
     setLookAndFeel (&laf);
     setTitle ("Vintage Visual meter");
 
@@ -116,19 +117,26 @@ MeterView::MeterView (VintageVisualProcessor& p, Mode m)
         rebuildSlots();
     };
 
-    for (int s = 0; s < maxSlots; ++s)
+    dockCountBox.setTitle ("Number of panels");
+    dockCountBox.setTooltip ("How many visualizers the strip shows (1 to 8)");
+    for (int n = 1; n <= maxDockSlots; ++n)
+        dockCountBox.addItem (juce::String (n) + (n == 1 ? " panel" : " panels"), n);
+    dockCountBox.onChange = [this]
     {
-        auto& box = slotBoxes[(size_t) s];
-        for (int k = 0; k < numPanels; ++k)
-            box.addItem (getPanelName (static_cast<PanelKind> (k)), k + 1);
-        box.setTitle ("Panel " + juce::String (s + 1));
-        box.setTooltip ("Choose what this panel shows. Drag a panel onto another to swap them");
-        box.onChange = [this, s]
-        {
-            storeKind (s, slotBoxes[(size_t) s].getSelectedId() - 1);
-            rebuildSlots();
-        };
-        addChildComponent (box);
+        owner.dockCount.store (juce::jlimit (1, maxDockSlots, dockCountBox.getSelectedId()));
+        rebuildSlots();
+    };
+    addChildComponent (dockCountBox);
+
+    for (int s = 0; s < maxViewSlots; ++s)
+    {
+        auto& button = slotButtons[(size_t) s];
+        button.setButtonText ("...");
+        button.setTitle ("Panel " + juce::String (s + 1) + " visualizer");
+        button.setTooltip ("Choose what this panel shows. Drag a panel onto another to swap them");
+        button.onClick = [this, s] { showSlotMenu (s); };
+        button.setAlpha (0.0f);  // fades in when the pointer is over the slot
+        addChildComponent (button);
     }
 
     skinButton.setTitle ("Skin");
@@ -146,6 +154,10 @@ MeterView::MeterView (VintageVisualProcessor& p, Mode m)
             repaint();
         }
     };
+
+    saveButton.setTitle ("Save configuration");
+    saveButton.setTooltip ("Save this configuration. New instances of the plug-in will open with it");
+    saveButton.onClick = [this] { saveConfiguration(); };
 
     resetButton.setTitle ("Reset meters");
     resetButton.setTooltip ("Restart integrated loudness, range and true peak");
@@ -180,7 +192,7 @@ MeterView::MeterView (VintageVisualProcessor& p, Mode m)
     closeButton.onClick = [this] { notify (WindowAction::close); };
 
     for (juce::Component* c : std::initializer_list<juce::Component*> { &layoutBox, &skinButton, &targetBox, &resetButton, &detachButton,
-                                                                         &pinButton, &dockButton, &fullButton, &closeButton })
+                                                                         &pinButton, &dockButton, &fullButton, &closeButton, &saveButton })
         addAndMakeVisible (c);
 
     if (mode == Mode::floating)
@@ -225,9 +237,7 @@ void MeterView::setCompact (bool shouldBeCompact)
 {
     if (compact == shouldBeCompact) return;
     compact = shouldBeCompact;
-    updateVisibility();
-    resized();
-    repaint();
+    rebuildSlots();  // the strip has its own set of panels; this also updates visibility, layout and painting
 }
 
 LayoutPreset MeterView::activePreset() const
@@ -238,24 +248,51 @@ LayoutPreset MeterView::activePreset() const
 
 int MeterView::getActiveSlotCount() const noexcept
 {
+    if (compact) return juce::jlimit (1, maxDockSlots, owner.dockCount.load());
     return slotCount (activePreset());
+}
+
+// A key that changes whenever the arrangement of slots changes (layout preset, or the DOCK strip and its count).
+int MeterView::layoutKey() const
+{
+    return compact ? 100 + getActiveSlotCount() : (int) activePreset();
 }
 
 int MeterView::kindAt (int slot) const
 {
-    const auto& source = windowState.full ? owner.fullSlotPanels : owner.slotPanels;
-    return juce::jlimit (0, numPanels - 1, source[(size_t) slot].load());
+    int raw = 0;
+
+    if (compact)
+    {
+        raw = owner.dockSlotPanels[(size_t) std::clamp (slot, 0, maxDockSlots - 1)].load();
+    }
+    else
+    {
+        const auto& source = windowState.full ? owner.fullSlotPanels : owner.slotPanels;
+        raw = source[(size_t) std::clamp (slot, 0, maxSlots - 1)].load();
+    }
+
+    return juce::jlimit (0, numPanels - 1, raw);
 }
 
 void MeterView::storeKind (int slot, int kind)
 {
-    auto& target = windowState.full ? owner.fullSlotPanels : owner.slotPanels;
-    target[(size_t) slot].store (juce::jlimit (0, numPanels - 1, kind));
+    const int value = juce::jlimit (0, numPanels - 1, kind);
+
+    if (compact)
+    {
+        owner.dockSlotPanels[(size_t) std::clamp (slot, 0, maxDockSlots - 1)].store (value);
+    }
+    else
+    {
+        auto& target = windowState.full ? owner.fullSlotPanels : owner.slotPanels;
+        target[(size_t) std::clamp (slot, 0, maxSlots - 1)].store (value);
+    }
 }
 
 bool MeterView::needsRebuild() const
 {
-    if ((int) activePreset() != appliedPreset) return true;
+    if (layoutKey() != appliedPreset) return true;
     for (int i = 0; i < getActiveSlotCount(); ++i)
         if (kindAt (i) != appliedKinds[(size_t) i]) return true;
     return false;
@@ -263,11 +300,10 @@ bool MeterView::needsRebuild() const
 
 void MeterView::rebuildSlots()
 {
-    const auto preset = activePreset();
-    const int count = slotCount (preset);
-    appliedPreset = (int) preset;
+    const int count = getActiveSlotCount();
+    appliedPreset = layoutKey();
 
-    for (int i = 0; i < maxSlots; ++i)
+    for (int i = 0; i < maxViewSlots; ++i)
     {
         auto& panel = panels[(size_t) i];
 
@@ -284,7 +320,6 @@ void MeterView::rebuildSlots()
                     addAndMakeVisible (*panel);
                 }
             }
-            slotBoxes[(size_t) i].setSelectedId (kind + 1, juce::dontSendNotification);
         }
         else
         {
@@ -310,6 +345,62 @@ void MeterView::swapSlots (int a, int b)
     juce::AccessibilityHandler::postAnnouncement ("Panels swapped", juce::AccessibilityHandler::AnnouncementPriority::medium);
 }
 
+void MeterView::setSlotKind (int slot, int kind)
+{
+    if (slot < 0 || slot >= getActiveSlotCount()) return;
+    storeKind (slot, kind);
+    rebuildSlots();
+}
+
+void MeterView::showSlotMenu (int slot)
+{
+    if (slot < 0 || slot >= getActiveSlotCount()) return;
+
+    juce::PopupMenu menu;
+    const int current = kindAt (slot);
+    for (int k = 0; k < numPanels; ++k)
+        menu.addItem (k + 1, getPanelName (static_cast<PanelKind> (k)), true, k == current);
+
+    menuOpenSlot = slot;
+    juce::Component::SafePointer<MeterView> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&slotButtons[(size_t) slot]), [safe, slot] (int result)
+    {
+        if (safe == nullptr) return;
+        safe->menuOpenSlot = -1;
+        if (result > 0) safe->setSlotKind (slot, result - 1);
+    });
+}
+
+// The "..." selectors are only drawn while the pointer is over their slot (or they have keyboard focus or an open menu).
+// They stay in the focus order the whole time, so keyboard and screen-reader users can always reach them.
+void MeterView::updateSlotButtons()
+{
+    const bool inside = isMouseOver (true);
+    const auto mouse = getMouseXYRelative();
+    const int count = getActiveSlotCount();
+
+    for (int i = 0; i < count; ++i)
+    {
+        auto& button = slotButtons[(size_t) i];
+        const bool wanted = menuOpenSlot == i || button.hasKeyboardFocus (true) || (inside && slotBounds[(size_t) i].contains (mouse));
+
+        float& alpha = slotButtonAlpha[(size_t) i];
+        const float target = wanted ? 1.0f : 0.0f;
+        alpha += (target - alpha) * 0.5f;
+        if (std::abs (target - alpha) < 0.04f) alpha = target;
+        if (button.getAlpha() != alpha) button.setAlpha (alpha);
+    }
+}
+
+void MeterView::saveConfiguration()
+{
+    const bool ok = owner.saveUserConfig();
+    saveButton.setButtonText (ok ? "Saved" : "Error");
+    saveFeedbackTicks = 75;  // about 2.5 s at 30 Hz, then the label returns to "Save"
+    juce::AccessibilityHandler::postAnnouncement (ok ? "Configuration saved. New instances will open with it" : "Could not save the configuration",
+                                                  juce::AccessibilityHandler::AnnouncementPriority::medium);
+}
+
 bool MeterView::loudnessOnScreen() const
 {
     for (int i = 0; i < getActiveSlotCount(); ++i)
@@ -332,10 +423,13 @@ void MeterView::updateVisibility()
     closeButton.setVisible (floating);
     fullButton.setVisible (floating && ! compact);
 
-    for (int i = 0; i < maxSlots; ++i)
+    dockCountBox.setVisible (compact);
+    saveButton.setVisible (true);
+
+    for (int i = 0; i < maxViewSlots; ++i)
     {
-        const bool shown = ! compact && i < count;
-        slotBoxes[(size_t) i].setVisible (shown);
+        const bool shown = i < count;
+        slotButtons[(size_t) i].setVisible (shown);
         if (panels[(size_t) i] != nullptr) panels[(size_t) i]->setVisible (shown);
     }
 }
@@ -389,7 +483,7 @@ void MeterView::refreshNow()
     {
         lastSerial = owner.getReadingsSerial();
         readings = owner.getLatestReadings();
-        repaint (compact ? compactArea : readoutArea.getUnion (deltaArea));
+        if (! compact) repaint (readoutArea.getUnion (deltaArea));  // the strip shows readings through its LUFS panel
     }
 
     if (owner.skinIndex.load() != appliedSkin) applySkin (owner.skinIndex.load());
@@ -404,11 +498,18 @@ void MeterView::refreshNow()
         repaint();
     }
 
+    const int wantedDock = owner.dockCount.load();
+    if (dockCountBox.getSelectedId() != wantedDock) dockCountBox.setSelectedId (wantedDock, juce::dontSendNotification);
+
     if (needsRebuild()) rebuildSlots();
 
-    if (! compact)
-        for (auto& panel : panels)
-            if (panel != nullptr) panel->update();
+    for (auto& panel : panels)
+        if (panel != nullptr) panel->update();
+
+    updateSlotButtons();
+
+    if (saveFeedbackTicks > 0 && --saveFeedbackTicks == 0)
+        saveButton.setButtonText ("Save");
 
     if (mode == Mode::embedded)
         detachButton.setToggleState (owner.isMeterFloating(), juce::dontSendNotification);
@@ -458,6 +559,8 @@ void MeterView::layoutFull (juce::Rectangle<int> area)
         detachButton.setBounds (row1.removeFromRight (72));
         row1.removeFromRight (space::sm);
     }
+    saveButton.setBounds (row1.removeFromRight (64));
+    row1.removeFromRight (space::sm);
     titleArea = row1;
 
     area.removeFromTop (space::sm);
@@ -493,7 +596,7 @@ void MeterView::layoutFull (juce::Rectangle<int> area)
     const int count = getActiveSlotCount();
     const auto slots = computeSlots (activePreset(), gridArea.getWidth(), gridArea.getHeight(), space::sm);
 
-    for (int i = 0; i < maxSlots; ++i)
+    for (int i = 0; i < maxViewSlots; ++i)
     {
         if (i >= count)
         {
@@ -502,31 +605,59 @@ void MeterView::layoutFull (juce::Rectangle<int> area)
         }
 
         const auto& s = slots[(size_t) i];
-        const juce::Rectangle<int> rect (gridArea.getX() + s.x, gridArea.getY() + s.y, s.w, s.h);
-        slotBounds[(size_t) i] = rect;
-
-        slotBoxes[(size_t) i].setBounds (rect.getX() + space::sm, rect.getY() + space::xs, std::min (170, std::max (60, rect.getWidth() - 2 * space::sm)), controlHeight);
-        if (panels[(size_t) i] != nullptr)
-            panels[(size_t) i]->setBounds (rect.reduced (space::sm).withTrimmedTop (headerHeight - space::sm + space::xs));
+        placeSlot (i, { gridArea.getX() + s.x, gridArea.getY() + s.y, s.w, s.h }, space::sm);
     }
+}
+
+// Puts a slot's rectangle, its "..." button (top-left corner, on top of the panel) and its panel in place.
+void MeterView::placeSlot (int i, juce::Rectangle<int> rect, int panelInset)
+{
+    using namespace theme;
+
+    slotBounds[(size_t) i] = rect;
+    slotButtons[(size_t) i].setBounds (rect.getX() + space::sm, rect.getY() + space::xs, slotButtonWidth, slotButtonHeight);
+    if (panels[(size_t) i] != nullptr)
+        panels[(size_t) i]->setBounds (rect.reduced (panelInset));
 }
 
 void MeterView::layoutCompact (juce::Rectangle<int> area)
 {
     using namespace theme;
 
-    auto place = [&] (juce::Button& b, int w)
+    // Top row: panel count on the left, window buttons on the right. Below: the row of panels.
+    auto top = area.removeFromTop (controlHeight);
+    auto place = [&] (juce::Component& c, int w)
     {
-        b.setBounds (area.removeFromRight (w).withSizeKeepingCentre (w, controlHeight));
-        area.removeFromRight (space::sm);
+        c.setBounds (top.removeFromRight (w));
+        top.removeFromRight (space::sm);
     };
 
     place (closeButton, 64);
     place (dockButton, 64);
     place (pinButton, 56);
-    compactArea = area;
+    place (saveButton, 64);
+    dockCountBox.setBounds (top.removeFromLeft (100));
+
     titleArea = {};
     deltaArea = footerArea = readoutArea = {};
+
+    area.removeFromTop (space::xs);
+    gridArea = area;
+
+    const int count = getActiveSlotCount();
+    const auto slots = computeDockSlots (count, gridArea.getWidth(), gridArea.getHeight(), space::sm);
+
+    for (int i = 0; i < maxViewSlots; ++i)
+    {
+        if (i >= count)
+        {
+            slotBounds[(size_t) i] = {};
+            continue;
+        }
+
+        const auto& s = slots[(size_t) i];
+        placeSlot (i, { gridArea.getX() + s.x, gridArea.getY() + s.y, s.w, s.h }, space::xs);
+    }
 }
 
 // ------------------------------------------------------------------ painting
@@ -575,20 +706,14 @@ void MeterView::paintCompact (juce::Graphics& g)
 {
     using namespace theme;
 
-    g.setColour (palette.displayBackground);
-    g.fillRoundedRectangle (compactArea.toFloat(), cornerRadius);
-
-    auto inner = compactArea.reduced (space::md, space::xs);
-    auto left = inner.removeFromLeft (150);
-
-    g.setColour (palette.displayDim);
-    g.setFont (bodyFont (fontSize::note));
-    g.drawText ("Momentary LUFS", left.removeFromTop (14), juce::Justification::centredLeft);
-    g.setColour (palette.displayText);
-    g.setFont (monoFont (juce::jlimit (16.0f, 30.0f, (float) left.getHeight() * 0.9f)));
-    g.drawText (formatValue (readings.momentary), left, juce::Justification::centredLeft);
-
-    drawCells (g, inner, false);
+    for (int i = 0; i < getActiveSlotCount(); ++i)
+    {
+        const auto r = slotBounds[(size_t) i].toFloat();
+        g.setColour (palette.displayBackground);
+        g.fillRoundedRectangle (r, cornerRadius);
+        g.setColour (palette.separator);
+        g.drawRoundedRectangle (r.reduced (0.5f), cornerRadius, 1.0f);
+    }
 }
 
 void MeterView::paintFull (juce::Graphics& g)
@@ -631,7 +756,7 @@ void MeterView::paintFull (juce::Graphics& g)
 
 void MeterView::paintOverChildren (juce::Graphics& g)
 {
-    if (dragFrom < 0 || compact) return;
+    if (dragFrom < 0) return;
 
     g.setColour (palette.surface.withAlpha (0.35f));
     g.fillRoundedRectangle (slotBounds[(size_t) dragFrom].toFloat(), theme::cornerRadius);
@@ -647,7 +772,6 @@ void MeterView::paintOverChildren (juce::Graphics& g)
 
 int MeterView::slotAt (juce::Point<int> p) const
 {
-    if (compact) return -1;
     for (int i = 0; i < getActiveSlotCount(); ++i)
         if (slotBounds[(size_t) i].contains (p)) return i;
     return -1;

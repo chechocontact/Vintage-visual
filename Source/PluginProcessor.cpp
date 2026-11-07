@@ -20,6 +20,13 @@ VintageVisualProcessor::VintageVisualProcessor()
         slotPanels[(size_t) i].store (normalDefaults[i]);
         fullSlotPanels[(size_t) i].store (fullDefaults[i]);
     }
+
+    // DOCK defaults: LUFS, spectrum and levels first, then the rest.
+    constexpr int dockDefaults[maxDockSlots] = { 0, 1, 3, 2, 7, 5, 4, 6 };
+    for (int i = 0; i < maxDockSlots; ++i)
+        dockSlotPanels[(size_t) i].store (dockDefaults[i]);
+
+    loadUserConfig();  // a new instance starts from the user's saved configuration, if there is one
 }
 
 VintageVisualProcessor::~VintageVisualProcessor()
@@ -98,46 +105,117 @@ juce::AudioProcessorEditor* VintageVisualProcessor::createEditor()
     return new VintageVisualEditor (*this);
 }
 
-void VintageVisualProcessor::getStateInformation (juce::MemoryBlock& destData)
+std::unique_ptr<juce::XmlElement> VintageVisualProcessor::createStateXml() const
 {
-    juce::XmlElement xml ("VintageVisual");
-    xml.setAttribute ("version", stateVersion);
-    xml.setAttribute ("skin", skinIndex.load());
-    xml.setAttribute ("target", (double) targetLufs.load());
-    xml.setAttribute ("layout", layoutPreset.load());
+    auto xml = std::make_unique<juce::XmlElement> ("VintageVisual");
+    xml->setAttribute ("version", stateVersion);
+    xml->setAttribute ("skin", skinIndex.load());
+    xml->setAttribute ("target", (double) targetLufs.load());
+    xml->setAttribute ("layout", layoutPreset.load());
     for (int i = 0; i < maxSlots; ++i)
     {
-        xml.setAttribute ("slot" + juce::String (i), slotPanels[(size_t) i].load());
-        xml.setAttribute ("fslot" + juce::String (i), fullSlotPanels[(size_t) i].load());
+        xml->setAttribute ("slot" + juce::String (i), slotPanels[(size_t) i].load());
+        xml->setAttribute ("fslot" + juce::String (i), fullSlotPanels[(size_t) i].load());
     }
-    xml.setAttribute ("pinned", pinned.load());
-    xml.setAttribute ("width", uiWidth.load());
-    xml.setAttribute ("height", uiHeight.load());
-    copyXmlToBinary (xml, destData);
+    xml->setAttribute ("dockCount", dockCount.load());
+    for (int i = 0; i < maxDockSlots; ++i)
+        xml->setAttribute ("dslot" + juce::String (i), dockSlotPanels[(size_t) i].load());
+    xml->setAttribute ("dockHeight", dockHeight.load());
+    xml->setAttribute ("pinned", pinned.load());
+    xml->setAttribute ("width", uiWidth.load());
+    xml->setAttribute ("height", uiHeight.load());
+    return xml;
+}
+
+void VintageVisualProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    copyXmlToBinary (*createStateXml(), destData);
+}
+
+void VintageVisualProcessor::applyStateXml (const juce::XmlElement& xml)
+{
+    if (! xml.hasTagName ("VintageVisual")) return;
+    if (xml.getIntAttribute ("version", 1) > stateVersion) return;  // written by a newer build: ignore
+
+    skinIndex.store (std::clamp (xml.getIntAttribute ("skin", 0), 0, numSkins - 1));
+
+    const double target = xml.getDoubleAttribute ("target", -14.0);
+    if (std::isfinite (target))
+        targetLufs.store ((float) std::clamp (target, -40.0, 0.0));
+
+    layoutPreset.store (std::clamp (xml.getIntAttribute ("layout", 0), 0, numUserLayouts - 1));
+    for (int i = 0; i < maxSlots; ++i)
+    {
+        const int legacy = i == 0 ? xml.getIntAttribute ("panel", slotPanels[0].load()) : slotPanels[(size_t) i].load();  // older states stored one "panel"
+        slotPanels[(size_t) i].store (std::clamp (xml.getIntAttribute ("slot" + juce::String (i), legacy), 0, numPanels - 1));
+        fullSlotPanels[(size_t) i].store (std::clamp (xml.getIntAttribute ("fslot" + juce::String (i), fullSlotPanels[(size_t) i].load()), 0, numPanels - 1));
+    }
+
+    // DOCK settings are optional: states from 0.1.0 do not have them and keep the current values.
+    dockCount.store (std::clamp (xml.getIntAttribute ("dockCount", dockCount.load()), 1, maxDockSlots));
+    for (int i = 0; i < maxDockSlots; ++i)
+        dockSlotPanels[(size_t) i].store (std::clamp (xml.getIntAttribute ("dslot" + juce::String (i), dockSlotPanels[(size_t) i].load()), 0, numPanels - 1));
+    dockHeight.store (std::clamp (xml.getIntAttribute ("dockHeight", dockHeight.load()), ui::dockMinHeight, ui::dockMaxHeight));
+
+    pinned.store (xml.getBoolAttribute ("pinned", true));
+    uiWidth.store (std::clamp (xml.getIntAttribute ("width", ui::defaultWidth), ui::minWidth, ui::maxWidth));
+    uiHeight.store (std::clamp (xml.getIntAttribute ("height", ui::defaultHeight), ui::minHeight, ui::maxHeight));
 }
 
 void VintageVisualProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     const auto xml = getXmlFromBinary (data, sizeInBytes);
-    if (xml == nullptr || ! xml->hasTagName ("VintageVisual")) return;
-    if (xml->getIntAttribute ("version", 1) > stateVersion) return;  // written by a newer build: ignore
+    if (xml != nullptr) applyStateXml (*xml);
+}
 
-    skinIndex.store (std::clamp (xml->getIntAttribute ("skin", 0), 0, numSkins - 1));
+// ---------------------------------------------------------------- user configuration
 
-    const double target = xml->getDoubleAttribute ("target", -14.0);
-    if (std::isfinite (target))
-        targetLufs.store ((float) std::clamp (target, -40.0, 0.0));
+namespace
+{
+juce::File& configOverride()
+{
+    static juce::File file;  // empty = use the real location
+    return file;
+}
+} // namespace
 
-    layoutPreset.store (std::clamp (xml->getIntAttribute ("layout", 0), 0, numUserLayouts - 1));
-    for (int i = 0; i < maxSlots; ++i)
-    {
-        const int legacy = i == 0 ? xml->getIntAttribute ("panel", slotPanels[0].load()) : slotPanels[(size_t) i].load();  // older states stored one "panel"
-        slotPanels[(size_t) i].store (std::clamp (xml->getIntAttribute ("slot" + juce::String (i), legacy), 0, numPanels - 1));
-        fullSlotPanels[(size_t) i].store (std::clamp (xml->getIntAttribute ("fslot" + juce::String (i), fullSlotPanels[(size_t) i].load()), 0, numPanels - 1));
-    }
-    pinned.store (xml->getBoolAttribute ("pinned", true));
-    uiWidth.store (std::clamp (xml->getIntAttribute ("width", ui::defaultWidth), ui::minWidth, ui::maxWidth));
-    uiHeight.store (std::clamp (xml->getIntAttribute ("height", ui::defaultHeight), ui::minHeight, ui::maxHeight));
+void VintageVisualProcessor::setConfigFileOverride (const juce::File& file)
+{
+    configOverride() = file;
+}
+
+juce::File VintageVisualProcessor::getUserConfigFile()
+{
+    if (configOverride() != juce::File())
+        return configOverride();
+
+    // Windows: %APPDATA%/Vintage Visual/config.xml (no admin rights needed, unlike Program Files)
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+        .getChildFile ("Vintage Visual")
+        .getChildFile ("config.xml");
+}
+
+bool VintageVisualProcessor::saveUserConfig() const
+{
+    const auto file = getUserConfigFile();
+    if (! file.getParentDirectory().createDirectory().wasOk()) return false;
+
+    // Written to a temporary file first, so a crash never leaves a half-written configuration behind.
+    juce::TemporaryFile temp (file);
+    if (! createStateXml()->writeTo (temp.getFile())) return false;
+    return temp.overwriteTargetFileWithTemporary();
+}
+
+bool VintageVisualProcessor::loadUserConfig()
+{
+    const auto file = getUserConfigFile();
+    if (! file.existsAsFile() || file.getSize() > 64 * 1024) return false;
+
+    const auto xml = juce::parseXML (file);
+    if (xml == nullptr || ! xml->hasTagName ("VintageVisual")) return false;
+
+    applyStateXml (*xml);  // same validation and limits as a project state
+    return true;
 }
 } // namespace vintagevisual
 
