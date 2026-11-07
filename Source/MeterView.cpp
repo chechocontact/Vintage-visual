@@ -1,0 +1,700 @@
+#include "MeterView.h"
+
+#include <array>
+#include <cmath>
+
+namespace vintagevisual
+{
+namespace
+{
+struct Target
+{
+    const char* label;
+    float lufs;
+};
+
+constexpr std::array<Target, 4> targets { { { "-14 LUFS  Streaming", -14.0f },
+                                            { "-16 LUFS  Apple", -16.0f },
+                                            { "-23 LUFS  EBU R128", -23.0f },
+                                            { "-9 LUFS  Club", -9.0f } } };
+
+constexpr int headerHeight = theme::controlHeight + theme::space::xs;
+constexpr int readoutHeight = 44;
+
+juce::String formatValue (double v, int decimals = 1)
+{
+    return v <= silenceLufs + 0.5 ? juce::String ("-inf") : juce::String (v, decimals);
+}
+
+int nearestTarget (float lufs)
+{
+    int best = 0;
+    for (size_t i = 1; i < targets.size(); ++i)
+        if (std::abs (targets[i].lufs - lufs) < std::abs (targets[(size_t) best].lufs - lufs))
+            best = (int) i;
+    return best;
+}
+
+// Menu entry that shows a skin in its own colours: surface, name in its text colour, and four swatches.
+class SkinMenuItem final : public juce::PopupMenu::CustomComponent
+{
+public:
+    SkinMenuItem (int skin, bool isCurrent) : juce::PopupMenu::CustomComponent (true), index (skin), current (isCurrent) {}
+
+    void getIdealSize (int& width, int& height) override
+    {
+        width = 240;
+        height = theme::controlHeight + 4;
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        const auto& skin = skins[(size_t) index];
+        const auto& c = skin.colors;
+        auto r = getLocalBounds().toFloat().reduced (2.0f);
+
+        g.setColour (theme::colour (c.surface));
+        g.fillRoundedRectangle (r, 4.0f);
+        g.setColour (theme::colour (c.controlBorder));
+        g.drawRoundedRectangle (r, 4.0f, 1.0f);
+
+        auto swatches = r.reduced (6.0f, 7.0f).removeFromRight (4.0f * 16.0f + 3.0f * 3.0f);
+        for (std::uint32_t colour : { c.canvas, c.accent, c.traceLeft, c.traceRight })
+        {
+            auto chip = swatches.removeFromLeft (16.0f);
+            swatches.removeFromLeft (3.0f);
+            g.setColour (theme::colour (colour));
+            g.fillRoundedRectangle (chip, 3.0f);
+            g.setColour (theme::colour (c.controlBorder));
+            g.drawRoundedRectangle (chip, 3.0f, 1.0f);
+        }
+
+        g.setColour (theme::colour (c.textPrimary));
+        g.setFont (theme::bodyFont (theme::fontSize::label));
+        g.drawText (juce::String (skin.name) + (current ? "  (current)" : ""), r.reduced (10.0f, 0.0f).withTrimmedRight (4.0f * 19.0f + 6.0f),
+                    juce::Justification::centredLeft, true);
+
+        if (isItemHighlighted())
+        {
+            g.setColour (theme::colour (c.focus));
+            g.drawRoundedRectangle (r.reduced (1.0f), 4.0f, theme::focusRingWidth);
+        }
+    }
+
+private:
+    int index;
+    bool current;
+};
+} // namespace
+
+juce::Image renderSkinMenuItem (int skin, bool isCurrent)
+{
+    SkinMenuItem item (juce::jlimit (0, numSkins - 1, skin), isCurrent);
+    int w = 0, h = 0;
+    item.getIdealSize (w, h);
+    item.setSize (w, h);
+    return item.createComponentSnapshot (item.getLocalBounds());
+}
+
+MeterView::MeterView (VintageVisualProcessor& p, Mode m)
+    : owner (p), mode (m), palette (skins[0].colors)
+{
+    appliedKinds.fill (-1);
+    setLookAndFeel (&laf);
+    setTitle ("Vintage Visual meter");
+
+    for (int i = 0; i < numUserLayouts; ++i)
+        layoutBox.addItem (layoutName (static_cast<LayoutPreset> (i)), i + 1);
+    for (size_t i = 0; i < targets.size(); ++i)
+        targetBox.addItem (targets[i].label, (int) i + 1);
+
+    layoutBox.setTitle ("Layout");
+    layoutBox.setTooltip ("How many panels to show");
+    layoutBox.onChange = [this]
+    {
+        owner.layoutPreset.store (layoutBox.getSelectedId() - 1);
+        rebuildSlots();
+    };
+
+    for (int s = 0; s < maxSlots; ++s)
+    {
+        auto& box = slotBoxes[(size_t) s];
+        for (int k = 0; k < numPanels; ++k)
+            box.addItem (getPanelName (static_cast<PanelKind> (k)), k + 1);
+        box.setTitle ("Panel " + juce::String (s + 1));
+        box.setTooltip ("Choose what this panel shows. Drag a panel onto another to swap them");
+        box.onChange = [this, s]
+        {
+            storeKind (s, slotBoxes[(size_t) s].getSelectedId() - 1);
+            rebuildSlots();
+        };
+        addChildComponent (box);
+    }
+
+    skinButton.setTitle ("Skin");
+    skinButton.setTooltip ("Choose the colour scheme");
+    skinButton.onClick = [this] { showSkinMenu(); };
+
+    targetBox.setTitle ("Loudness target");
+    targetBox.setTooltip ("Reference level for the integrated loudness comparison");
+    targetBox.onChange = [this]
+    {
+        const int idx = targetBox.getSelectedId() - 1;
+        if (idx >= 0 && idx < (int) targets.size())
+        {
+            owner.targetLufs.store (targets[(size_t) idx].lufs);
+            repaint();
+        }
+    };
+
+    resetButton.setTitle ("Reset meters");
+    resetButton.setTooltip ("Restart integrated loudness, range and true peak");
+    resetButton.onClick = [this]
+    {
+        owner.resetMeters();
+        juce::AccessibilityHandler::postAnnouncement ("Meters reset", juce::AccessibilityHandler::AnnouncementPriority::medium);
+    };
+
+    detachButton.setTitle ("Float meter");
+    detachButton.setTooltip ("Open the meter in its own window, outside the DAW editor");
+    detachButton.onClick = [this]
+    {
+        if (owner.isMeterFloating()) owner.hideFloatingMeter();
+        else owner.showFloatingMeter();
+    };
+
+    pinButton.setTitle ("Keep on top");
+    pinButton.setTooltip ("Keep this window above all others");
+    pinButton.onClick = [this] { notify (WindowAction::togglePin); };
+
+    dockButton.setTitle ("Dock to top of screen");
+    dockButton.setTooltip ("Shrink to a strip at the top of the screen");
+    dockButton.onClick = [this] { notify (WindowAction::toggleDock); };
+
+    fullButton.setTitle ("Full screen");
+    fullButton.setTooltip ("Fill the screen with a grid of modules. Press Escape to leave");
+    fullButton.onClick = [this] { notify (WindowAction::toggleFull); };
+
+    closeButton.setTitle ("Close meter window");
+    closeButton.setTooltip ("Close this window. The meter keeps running in the DAW");
+    closeButton.onClick = [this] { notify (WindowAction::close); };
+
+    for (juce::Component* c : std::initializer_list<juce::Component*> { &layoutBox, &skinButton, &targetBox, &resetButton, &detachButton,
+                                                                         &pinButton, &dockButton, &fullButton, &closeButton })
+        addAndMakeVisible (c);
+
+    if (mode == Mode::floating)
+        setWantsKeyboardFocus (true);
+
+    layoutBox.setSelectedId (owner.layoutPreset.load() + 1, juce::dontSendNotification);
+    targetBox.setSelectedId (nearestTarget (owner.targetLufs.load()) + 1, juce::dontSendNotification);
+    applySkin (owner.skinIndex.load());
+    rebuildSlots();
+    startTimerHz (30);
+}
+
+MeterView::~MeterView()
+{
+    setLookAndFeel (nullptr);
+}
+
+void MeterView::notify (WindowAction a) const
+{
+    if (onWindowAction) onWindowAction (a);
+}
+
+bool MeterView::canDragWindow() const noexcept
+{
+    return mode == Mode::floating && ! windowState.full && ! windowState.docked;
+}
+
+// ------------------------------------------------------------------ state
+
+void MeterView::setWindowState (const WindowState& s)
+{
+    const bool fullChanged = s.full != windowState.full;
+    windowState = s;
+    pinButton.setToggleState (s.pinned, juce::dontSendNotification);
+    dockButton.setToggleState (s.docked, juce::dontSendNotification);
+    fullButton.setToggleState (s.full, juce::dontSendNotification);
+    if (fullChanged) rebuildSlots();
+    repaint();
+}
+
+void MeterView::setCompact (bool shouldBeCompact)
+{
+    if (compact == shouldBeCompact) return;
+    compact = shouldBeCompact;
+    updateVisibility();
+    resized();
+    repaint();
+}
+
+LayoutPreset MeterView::activePreset() const
+{
+    if (windowState.full) return LayoutPreset::full5;
+    return static_cast<LayoutPreset> (juce::jlimit (0, numUserLayouts - 1, owner.layoutPreset.load()));
+}
+
+int MeterView::getActiveSlotCount() const noexcept
+{
+    return slotCount (activePreset());
+}
+
+int MeterView::kindAt (int slot) const
+{
+    const auto& source = windowState.full ? owner.fullSlotPanels : owner.slotPanels;
+    return juce::jlimit (0, numPanels - 1, source[(size_t) slot].load());
+}
+
+void MeterView::storeKind (int slot, int kind)
+{
+    auto& target = windowState.full ? owner.fullSlotPanels : owner.slotPanels;
+    target[(size_t) slot].store (juce::jlimit (0, numPanels - 1, kind));
+}
+
+bool MeterView::needsRebuild() const
+{
+    if ((int) activePreset() != appliedPreset) return true;
+    for (int i = 0; i < getActiveSlotCount(); ++i)
+        if (kindAt (i) != appliedKinds[(size_t) i]) return true;
+    return false;
+}
+
+void MeterView::rebuildSlots()
+{
+    const auto preset = activePreset();
+    const int count = slotCount (preset);
+    appliedPreset = (int) preset;
+
+    for (int i = 0; i < maxSlots; ++i)
+    {
+        auto& panel = panels[(size_t) i];
+
+        if (i < count)
+        {
+            const int kind = kindAt (i);
+            if (appliedKinds[(size_t) i] != kind || panel == nullptr)
+            {
+                panel = makePanel (static_cast<PanelKind> (kind), owner);
+                appliedKinds[(size_t) i] = kind;
+                if (panel != nullptr)
+                {
+                    panel->setPalette (palette);
+                    addAndMakeVisible (*panel);
+                }
+            }
+            slotBoxes[(size_t) i].setSelectedId (kind + 1, juce::dontSendNotification);
+        }
+        else
+        {
+            panel.reset();
+            appliedKinds[(size_t) i] = -1;
+        }
+    }
+
+    updateVisibility();
+    resized();
+    repaint();
+}
+
+void MeterView::swapSlots (int a, int b)
+{
+    const int count = getActiveSlotCount();
+    if (a < 0 || b < 0 || a >= count || b >= count || a == b) return;
+
+    const int ka = kindAt (a), kb = kindAt (b);
+    storeKind (a, kb);
+    storeKind (b, ka);
+    rebuildSlots();
+    juce::AccessibilityHandler::postAnnouncement ("Panels swapped", juce::AccessibilityHandler::AnnouncementPriority::medium);
+}
+
+bool MeterView::loudnessOnScreen() const
+{
+    for (int i = 0; i < getActiveSlotCount(); ++i)
+        if (appliedKinds[(size_t) i] == (int) PanelKind::loudness) return true;
+    return false;
+}
+
+void MeterView::updateVisibility()
+{
+    const bool floating = mode == Mode::floating;
+    const int count = getActiveSlotCount();
+
+    layoutBox.setVisible (! compact && ! windowState.full);
+    skinButton.setVisible (! compact);
+    targetBox.setVisible (! compact);
+    resetButton.setVisible (! compact);
+    detachButton.setVisible (! floating);
+    pinButton.setVisible (floating);
+    dockButton.setVisible (floating);
+    closeButton.setVisible (floating);
+    fullButton.setVisible (floating && ! compact);
+
+    for (int i = 0; i < maxSlots; ++i)
+    {
+        const bool shown = ! compact && i < count;
+        slotBoxes[(size_t) i].setVisible (shown);
+        if (panels[(size_t) i] != nullptr) panels[(size_t) i]->setVisible (shown);
+    }
+}
+
+void MeterView::applySkin (int index)
+{
+    index = juce::jlimit (0, numSkins - 1, index);
+    appliedSkin = index;
+    palette = theme::Palette (skins[(size_t) index].colors);
+    laf.applyPalette (palette);
+    skinButton.setButtonText (skins[(size_t) index].name);
+    for (auto& panel : panels)
+        if (panel != nullptr) panel->setPalette (palette);
+    sendLookAndFeelChange();
+    syncWindowBackground();
+    repaint();
+}
+
+void MeterView::showSkinMenu()
+{
+    juce::PopupMenu menu;
+    for (int i = 0; i < numSkins; ++i)
+        menu.addCustomItem (i + 1, std::make_unique<SkinMenuItem> (i, i == appliedSkin), nullptr, skins[(size_t) i].name);
+
+    juce::Component::SafePointer<MeterView> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&skinButton), [safe] (int result)
+    {
+        if (safe == nullptr || result <= 0) return;
+        safe->owner.skinIndex.store (result - 1);
+        safe->applySkin (result - 1);
+    });
+}
+
+// The floating window's own background must follow the skin, or its edge shows another skin's colour.
+void MeterView::syncWindowBackground()
+{
+    if (auto* window = dynamic_cast<juce::ResizableWindow*> (getTopLevelComponent()))
+        window->setBackgroundColour (palette.canvas);
+}
+
+void MeterView::parentHierarchyChanged()
+{
+    syncWindowBackground();
+}
+
+void MeterView::refreshNow()
+{
+    owner.refreshReadings();
+
+    if (lastSerial != owner.getReadingsSerial())
+    {
+        lastSerial = owner.getReadingsSerial();
+        readings = owner.getLatestReadings();
+        repaint (compact ? compactArea : readoutArea.getUnion (deltaArea));
+    }
+
+    if (owner.skinIndex.load() != appliedSkin) applySkin (owner.skinIndex.load());
+
+    const int wantedLayout = owner.layoutPreset.load() + 1;
+    if (layoutBox.getSelectedId() != wantedLayout) layoutBox.setSelectedId (wantedLayout, juce::dontSendNotification);
+
+    const int wantedTarget = nearestTarget (owner.targetLufs.load()) + 1;
+    if (targetBox.getSelectedId() != wantedTarget)
+    {
+        targetBox.setSelectedId (wantedTarget, juce::dontSendNotification);
+        repaint();
+    }
+
+    if (needsRebuild()) rebuildSlots();
+
+    if (! compact)
+        for (auto& panel : panels)
+            if (panel != nullptr) panel->update();
+
+    if (mode == Mode::embedded)
+        detachButton.setToggleState (owner.isMeterFloating(), juce::dontSendNotification);
+}
+
+juce::String MeterView::deltaText (bool& outOfRange) const
+{
+    outOfRange = false;
+    if (readings.integrated <= silenceLufs + 0.5)
+        return "Integrated: waiting for audio";
+
+    const double delta = readings.integrated - (double) owner.targetLufs.load();
+    outOfRange = std::abs (delta) >= 1.0;
+
+    if (std::abs (delta) < 0.05) return "Integrated: on target";
+    return "Integrated: " + juce::String (std::abs (delta), 1) + (delta > 0 ? " LU above target" : " LU below target");
+}
+
+// ------------------------------------------------------------------ layout
+
+void MeterView::resized()
+{
+    if (compact)
+        layoutCompact (getLocalBounds().reduced (theme::space::sm));
+    else
+        layoutFull (getLocalBounds().reduced (theme::space::sm + theme::space::md));
+}
+
+void MeterView::layoutFull (juce::Rectangle<int> area)
+{
+    using namespace theme;
+
+    auto row1 = area.removeFromTop (controlHeight);
+    if (mode == Mode::floating)
+    {
+        closeButton.setBounds (row1.removeFromRight (64));
+        row1.removeFromRight (space::sm);
+        fullButton.setBounds (row1.removeFromRight (60));
+        row1.removeFromRight (space::sm);
+        dockButton.setBounds (row1.removeFromRight (64));
+        row1.removeFromRight (space::sm);
+        pinButton.setBounds (row1.removeFromRight (56));
+        row1.removeFromRight (space::sm);
+    }
+    else
+    {
+        detachButton.setBounds (row1.removeFromRight (72));
+        row1.removeFromRight (space::sm);
+    }
+    titleArea = row1;
+
+    area.removeFromTop (space::sm);
+    auto row2 = area.removeFromTop (controlHeight);
+    if (! windowState.full)  // the layout selector is hidden in FULL, so do not leave a gap
+    {
+        layoutBox.setBounds (row2.removeFromLeft (100));
+        row2.removeFromLeft (space::sm);
+    }
+    skinButton.setBounds (row2.removeFromLeft (120));
+    row2.removeFromLeft (space::sm);
+    targetBox.setBounds (row2.removeFromLeft (170));
+    row2.removeFromLeft (space::sm);
+    resetButton.setBounds (row2.removeFromLeft (72));
+
+    area.removeFromTop (space::md);
+    footerArea = area.removeFromBottom (18);
+    area.removeFromBottom (space::sm);
+    deltaArea = area.removeFromBottom (22);
+    area.removeFromBottom (space::sm);
+
+    if (loudnessOnScreen())
+    {
+        readoutArea = {};
+    }
+    else
+    {
+        readoutArea = area.removeFromBottom (readoutHeight);
+        area.removeFromBottom (space::sm);
+    }
+
+    gridArea = area;
+    const int count = getActiveSlotCount();
+    const auto slots = computeSlots (activePreset(), gridArea.getWidth(), gridArea.getHeight(), space::sm);
+
+    for (int i = 0; i < maxSlots; ++i)
+    {
+        if (i >= count)
+        {
+            slotBounds[(size_t) i] = {};
+            continue;
+        }
+
+        const auto& s = slots[(size_t) i];
+        const juce::Rectangle<int> rect (gridArea.getX() + s.x, gridArea.getY() + s.y, s.w, s.h);
+        slotBounds[(size_t) i] = rect;
+
+        slotBoxes[(size_t) i].setBounds (rect.getX() + space::sm, rect.getY() + space::xs, std::min (170, std::max (60, rect.getWidth() - 2 * space::sm)), controlHeight);
+        if (panels[(size_t) i] != nullptr)
+            panels[(size_t) i]->setBounds (rect.reduced (space::sm).withTrimmedTop (headerHeight - space::sm + space::xs));
+    }
+}
+
+void MeterView::layoutCompact (juce::Rectangle<int> area)
+{
+    using namespace theme;
+
+    auto place = [&] (juce::Button& b, int w)
+    {
+        b.setBounds (area.removeFromRight (w).withSizeKeepingCentre (w, controlHeight));
+        area.removeFromRight (space::sm);
+    };
+
+    place (closeButton, 64);
+    place (dockButton, 64);
+    place (pinButton, 56);
+    compactArea = area;
+    titleArea = {};
+    deltaArea = footerArea = readoutArea = {};
+}
+
+// ------------------------------------------------------------------ painting
+
+void MeterView::drawCells (juce::Graphics& g, juce::Rectangle<int> cells, bool includeMomentary)
+{
+    using namespace theme;
+
+    juce::StringArray names, values;
+    if (includeMomentary)
+    {
+        names.add ("Momentary");
+        values.add (formatValue (readings.momentary) + " LUFS");
+    }
+    names.addArray ({ "Short-term", "Integrated", "Range", "True peak" });
+    values.add (formatValue (readings.shortTerm) + " LUFS");
+    values.add (formatValue (readings.integrated) + " LUFS");
+    values.add (juce::String (readings.loudnessRange, 1) + " LU");
+    values.add (formatValue (readings.truePeakDb) + " dBTP");
+
+    const int cellWidth = cells.getWidth() / names.size();
+
+    for (int i = 0; i < names.size(); ++i)
+    {
+        auto cell = cells.removeFromLeft (cellWidth);
+        g.setColour (palette.displayDim);
+        g.setFont (bodyFont (fontSize::note));
+        g.drawText (names[i], cell.removeFromTop (16), juce::Justification::centredLeft);
+        g.setColour (palette.displayText);
+        g.setFont (monoFont (fontSize::body));
+        g.drawText (values[i], cell, juce::Justification::centredLeft);
+    }
+}
+
+void MeterView::paint (juce::Graphics& g)
+{
+    g.fillAll (palette.canvas);
+    g.setColour (palette.surface);
+    g.fillRoundedRectangle (getLocalBounds().toFloat().reduced ((float) theme::space::xs), theme::cornerRadius * 2.0f);
+
+    if (compact) paintCompact (g);
+    else paintFull (g);
+}
+
+void MeterView::paintCompact (juce::Graphics& g)
+{
+    using namespace theme;
+
+    g.setColour (palette.displayBackground);
+    g.fillRoundedRectangle (compactArea.toFloat(), cornerRadius);
+
+    auto inner = compactArea.reduced (space::md, space::xs);
+    auto left = inner.removeFromLeft (150);
+
+    g.setColour (palette.displayDim);
+    g.setFont (bodyFont (fontSize::note));
+    g.drawText ("Momentary LUFS", left.removeFromTop (14), juce::Justification::centredLeft);
+    g.setColour (palette.displayText);
+    g.setFont (monoFont (juce::jlimit (16.0f, 30.0f, (float) left.getHeight() * 0.9f)));
+    g.drawText (formatValue (readings.momentary), left, juce::Justification::centredLeft);
+
+    drawCells (g, inner, false);
+}
+
+void MeterView::paintFull (juce::Graphics& g)
+{
+    using namespace theme;
+
+    g.setColour (palette.textPrimary);
+    g.setFont (titleFont (fontSize::title));
+    g.drawText ("Vintage Visual", titleArea, juce::Justification::centredLeft);
+
+    for (int i = 0; i < getActiveSlotCount(); ++i)
+    {
+        const auto r = slotBounds[(size_t) i].toFloat();
+        g.setColour (palette.displayBackground);
+        g.fillRoundedRectangle (r, cornerRadius);
+        g.setColour (palette.separator);
+        g.drawRoundedRectangle (r.reduced (0.5f), cornerRadius, 1.0f);
+    }
+
+    if (! readoutArea.isEmpty())
+    {
+        g.setColour (palette.displayBackground);
+        g.fillRoundedRectangle (readoutArea.toFloat(), cornerRadius);
+        g.setColour (palette.separator);
+        g.drawRoundedRectangle (readoutArea.toFloat().reduced (0.5f), cornerRadius, 1.0f);
+        drawCells (g, readoutArea.reduced (space::md, space::xs), true);
+    }
+
+    bool outOfRange = false;
+    const auto delta = deltaText (outOfRange);
+    g.setColour (outOfRange ? palette.warning : palette.textPrimary);
+    g.setFont (bodyFont (fontSize::body));
+    g.drawText (delta, deltaArea, juce::Justification::centredLeft);
+
+    g.setColour (palette.textSecondary);
+    g.setFont (bodyFont (fontSize::note));
+    g.drawText ("Audio passes through unchanged. Insert on the master track. Drag a panel onto another to swap them.", footerArea,
+                juce::Justification::centredLeft);
+}
+
+void MeterView::paintOverChildren (juce::Graphics& g)
+{
+    if (dragFrom < 0 || compact) return;
+
+    g.setColour (palette.surface.withAlpha (0.35f));
+    g.fillRoundedRectangle (slotBounds[(size_t) dragFrom].toFloat(), theme::cornerRadius);
+
+    if (dragTo >= 0 && dragTo != dragFrom)
+    {
+        g.setColour (palette.focus);
+        g.drawRoundedRectangle (slotBounds[(size_t) dragTo].toFloat().reduced (1.5f), theme::cornerRadius, 3.0f);
+    }
+}
+
+// ------------------------------------------------------------------ mouse and keyboard
+
+int MeterView::slotAt (juce::Point<int> p) const
+{
+    if (compact) return -1;
+    for (int i = 0; i < getActiveSlotCount(); ++i)
+        if (slotBounds[(size_t) i].contains (p)) return i;
+    return -1;
+}
+
+void MeterView::mouseDown (const juce::MouseEvent& e)
+{
+    dragFrom = slotAt (e.getPosition());
+    dragTo = -1;
+
+    if (dragFrom < 0 && canDragWindow())
+        dragger.startDraggingComponent (getTopLevelComponent(), e);
+}
+
+void MeterView::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragFrom >= 0)
+    {
+        const int target = slotAt (e.getPosition());
+        if (target != dragTo)
+        {
+            dragTo = target;
+            repaint (gridArea);
+        }
+    }
+    else if (canDragWindow())
+    {
+        dragger.dragComponent (getTopLevelComponent(), e, nullptr);
+    }
+}
+
+void MeterView::mouseUp (const juce::MouseEvent&)
+{
+    const int from = dragFrom, to = dragTo;
+    dragFrom = dragTo = -1;
+    if (from >= 0 && to >= 0 && from != to) swapSlots (from, to);
+    else repaint (gridArea);
+}
+
+bool MeterView::keyPressed (const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::escapeKey && windowState.full)
+    {
+        notify (WindowAction::toggleFull);
+        return true;
+    }
+
+    return false;
+}
+} // namespace vintagevisual
