@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     permissions:
       contents: write   # only used to publish a release when a version tag is pushed
     steps:
