@@ -281,9 +281,28 @@ static void testFloatingWindow()
 
     juce::Array<juce::Component*> stripControls;
     collectControls (*w, stripControls);
-    CHECK (stripControls.size() == 5 + p.dockCount.load());  // panel count, save, pin, dock, close + one "..." per panel
+    CHECK (stripControls.size() == 1 + p.dockCount.load());  // strip menu bar (panels, save, pin, undock, close) + one "..." per panel
+    juce::Component* menuBar = nullptr;
     for (auto* c : stripControls)
+    {
         CHECK (w->getLocalBounds().contains (w->getLocalArea (c->getParentComponent(), c->getBounds())));
+        if (c->getTitle() == "Strip menu") menuBar = c;
+    }
+
+    // The menu bar is a thin column at the right end, reachable by keyboard, and does not sit on top of any panel.
+    CHECK (menuBar != nullptr);
+    if (menuBar != nullptr)
+    {
+        CHECK (menuBar->getWantsKeyboardFocus());
+        CHECK (menuBar->getWidth() <= 16 && menuBar->getHeight() > menuBar->getWidth() * 4);
+        const auto bar = w->getLocalArea (menuBar->getParentComponent(), menuBar->getBounds());
+        for (auto* child : w->getView().getChildren())
+            if (dynamic_cast<VisualizerPanel*> (child) != nullptr && child->isVisible())
+            {
+                const auto panel = w->getLocalArea (child->getParentComponent(), child->getBounds());
+                CHECK (! panel.intersects (bar) && panel.getRight() < bar.getX());
+            }
+    }
 
     w->setDocked (false);
     CHECK (! w->isDocked() && ! w->getView().isCompact());

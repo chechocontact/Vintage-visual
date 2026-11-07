@@ -32,6 +32,32 @@ struct WindowState
 // Draws one row of the skin menu (the row shows the skin in its own colours). Used by tests and previews.
 juce::Image renderSkinMenuItem (int skin, bool isCurrent);
 
+// Thin vertical bar at the right end of the DOCK strip, as tall as the panels. Clicking it (or Enter/Space)
+// opens the strip menu: panel count, save, pin, undock and close. It draws three dots, which briefly turn
+// accent (saved) or warning (error) after a save. Message thread only.
+class DockMenuBar final : public juce::Button
+{
+public:
+    enum class Feedback
+    {
+        none,
+        saved,
+        error
+    };
+
+    DockMenuBar() : juce::Button ("Strip menu") {}
+
+    void setPalette (const theme::Palette* p) { palette = p; repaint(); }
+    void setFeedback (Feedback f) { if (feedback != f) { feedback = f; repaint(); } }
+    Feedback getFeedback() const noexcept { return feedback; }
+
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+
+private:
+    const theme::Palette* palette = nullptr;
+    Feedback feedback = Feedback::none;
+};
+
 // The meter UI: a toolbar, a grid of 1..5 visualiser panels and a readout bar.
 // It lives either inside the DAW's plug-in editor (embedded) or in the floating window.
 // Message thread only.
@@ -75,6 +101,7 @@ private:
     void applySkin (int index);
     void showSkinMenu();
     void showSlotMenu (int slot);
+    void showDockMenu();
     void updateSlotButtons();
     void saveConfiguration();
     void placeSlot (int slot, juce::Rectangle<int> rect, int panelInset);
@@ -117,6 +144,7 @@ private:
 
     juce::TextButton skinButton { "Skin" }, resetButton { "Reset" }, detachButton { "Float" }, saveButton { "Save" };
     juce::TextButton pinButton { "PIN" }, dockButton { "DOCK" }, fullButton { "FULL" }, closeButton { "Close" };
+    DockMenuBar dockMenuBar;  // DOCK only: replaces the panel count, Save, PIN, DOCK and Close controls
 
     juce::Rectangle<int> titleArea, gridArea, readoutArea, deltaArea, footerArea;
     LoudnessReadings readings;

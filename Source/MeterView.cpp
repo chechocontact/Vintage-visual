@@ -20,6 +20,10 @@ constexpr std::array<Target, 4> targets { { { "-14 LUFS  Streaming", -14.0f },
 
 constexpr int slotButtonWidth = 34, slotButtonHeight = 20;  // the small "..." selector
 constexpr int readoutHeight = 44;
+constexpr int dockMenuWidth = theme::space::md;  // the DOCK strip's menu bar
+
+// Ids of the DOCK strip menu. 1..maxDockSlots are the panel counts in the "Panels" submenu.
+constexpr int dockMenuSave = 101, dockMenuPin = 102, dockMenuUndock = 103, dockMenuClose = 104;
 
 juce::String formatValue (double v, int decimals = 1)
 {
@@ -94,6 +98,33 @@ juce::Image renderSkinMenuItem (int skin, bool isCurrent)
     item.getIdealSize (w, h);
     item.setSize (w, h);
     return item.createComponentSnapshot (item.getLocalBounds());
+}
+
+void DockMenuBar::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    if (palette == nullptr) return;
+
+    // Same shape as the strip's panels so the row stays even; the fill reacts to hover and press.
+    const auto r = getLocalBounds().toFloat();
+    g.setColour (down ? palette->controlPressed : highlighted ? palette->controlHover : palette->displayBackground);
+    g.fillRoundedRectangle (r, theme::cornerRadius);
+    g.setColour (palette->separator);
+    g.drawRoundedRectangle (r.reduced (0.5f), theme::cornerRadius, 1.0f);
+
+    if (hasKeyboardFocus (false))
+    {
+        g.setColour (palette->focus);
+        g.drawRoundedRectangle (r.reduced (theme::focusRingWidth * 0.5f), theme::cornerRadius, theme::focusRingWidth);
+    }
+
+    // Three dots stacked in the centre.
+    g.setColour (feedback == Feedback::saved ? palette->accent
+                 : feedback == Feedback::error ? palette->warning
+                 : highlighted ? palette->textPrimary : palette->textSecondary);
+    constexpr float dot = 3.0f, step = (float) theme::space::xs + dot;
+    const auto centre = r.getCentre();
+    for (int i = -1; i <= 1; ++i)
+        g.fillEllipse (juce::Rectangle<float> (dot, dot).withCentre ({ centre.x, centre.y + (float) i * step }));
 }
 
 MeterView::MeterView (VintageVisualProcessor& p, Mode m)
@@ -190,6 +221,12 @@ MeterView::MeterView (VintageVisualProcessor& p, Mode m)
     closeButton.setTitle ("Close meter window");
     closeButton.setTooltip ("Close this window. The meter keeps running in the DAW");
     closeButton.onClick = [this] { notify (WindowAction::close); };
+
+    dockMenuBar.setTitle ("Strip menu");
+    dockMenuBar.setTooltip ("Panels, save, keep on top, undock and close");
+    dockMenuBar.setPalette (&palette);
+    dockMenuBar.onClick = [this] { showDockMenu(); };
+    addChildComponent (dockMenuBar);
 
     for (juce::Component* c : std::initializer_list<juce::Component*> { &layoutBox, &skinButton, &targetBox, &resetButton, &detachButton,
                                                                          &pinButton, &dockButton, &fullButton, &closeButton, &saveButton })
@@ -371,6 +408,40 @@ void MeterView::showSlotMenu (int slot)
     });
 }
 
+// The DOCK strip menu. Each entry does exactly what its control does outside the strip.
+void MeterView::showDockMenu()
+{
+    juce::PopupMenu panelsMenu;
+    const int count = getActiveSlotCount();
+    for (int n = 1; n <= maxDockSlots; ++n)
+        panelsMenu.addItem (n, juce::String (n) + (n == 1 ? " panel" : " panels"), true, n == count);
+
+    juce::PopupMenu menu;
+    menu.addSubMenu ("Panels", panelsMenu);
+    menu.addSeparator();
+    menu.addItem (dockMenuSave, "Save configuration");
+    menu.addItem (dockMenuPin, "Keep on top", true, windowState.pinned);
+    menu.addItem (dockMenuUndock, "Undock");
+    menu.addSeparator();
+    menu.addItem (dockMenuClose, "Close");
+
+    juce::Component::SafePointer<MeterView> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&dockMenuBar), [safe] (int result)
+    {
+        if (safe == nullptr || result <= 0) return;
+
+        if (result <= maxDockSlots)
+        {
+            safe->owner.dockCount.store (result);
+            safe->rebuildSlots();
+        }
+        else if (result == dockMenuSave) safe->saveConfiguration();
+        else if (result == dockMenuPin) safe->notify (WindowAction::togglePin);
+        else if (result == dockMenuUndock) safe->notify (WindowAction::toggleDock);
+        else if (result == dockMenuClose) safe->notify (WindowAction::close);  // may delete this view: nothing after it
+    });
+}
+
 // The "..." selectors are only drawn while the pointer is over their slot (or they have keyboard focus or an open menu).
 // They stay in the focus order the whole time, so keyboard and screen-reader users can always reach them.
 void MeterView::updateSlotButtons()
@@ -396,6 +467,7 @@ void MeterView::saveConfiguration()
 {
     const bool ok = owner.saveUserConfig();
     saveButton.setButtonText (ok ? "Saved" : "Error");
+    dockMenuBar.setFeedback (ok ? DockMenuBar::Feedback::saved : DockMenuBar::Feedback::error);
     saveFeedbackTicks = 75;  // about 2.5 s at 30 Hz, then the label returns to "Save"
     juce::AccessibilityHandler::postAnnouncement (ok ? "Configuration saved. New instances will open with it" : "Could not save the configuration",
                                                   juce::AccessibilityHandler::AnnouncementPriority::medium);
@@ -418,13 +490,15 @@ void MeterView::updateVisibility()
     targetBox.setVisible (! compact);
     resetButton.setVisible (! compact);
     detachButton.setVisible (! floating);
-    pinButton.setVisible (floating);
-    dockButton.setVisible (floating);
-    closeButton.setVisible (floating);
+    // In the DOCK strip these controls live in the strip menu (dockMenuBar) instead.
+    pinButton.setVisible (floating && ! compact);
+    dockButton.setVisible (floating && ! compact);
+    closeButton.setVisible (floating && ! compact);
     fullButton.setVisible (floating && ! compact);
 
-    dockCountBox.setVisible (compact);
-    saveButton.setVisible (true);
+    dockCountBox.setVisible (false);
+    saveButton.setVisible (! compact);
+    dockMenuBar.setVisible (floating && compact);
 
     for (int i = 0; i < maxViewSlots; ++i)
     {
@@ -443,6 +517,7 @@ void MeterView::applySkin (int index)
     skinButton.setButtonText (skins[(size_t) index].name);
     for (auto& panel : panels)
         if (panel != nullptr) panel->setPalette (palette);
+    dockMenuBar.repaint();
     sendLookAndFeelChange();
     syncWindowBackground();
     repaint();
@@ -509,7 +584,10 @@ void MeterView::refreshNow()
     updateSlotButtons();
 
     if (saveFeedbackTicks > 0 && --saveFeedbackTicks == 0)
+    {
         saveButton.setButtonText ("Save");
+        dockMenuBar.setFeedback (DockMenuBar::Feedback::none);
+    }
 
     if (mode == Mode::embedded)
         detachButton.setToggleState (owner.isMeterFloating(), juce::dontSendNotification);
@@ -624,24 +702,14 @@ void MeterView::layoutCompact (juce::Rectangle<int> area)
 {
     using namespace theme;
 
-    // Top row: panel count on the left, window buttons on the right. Below: the row of panels.
-    auto top = area.removeFromTop (controlHeight);
-    auto place = [&] (juce::Component& c, int w)
-    {
-        c.setBounds (top.removeFromRight (w));
-        top.removeFromRight (space::sm);
-    };
-
-    place (closeButton, 64);
-    place (dockButton, 64);
-    place (pinButton, 56);
-    place (saveButton, 64);
-    dockCountBox.setBounds (top.removeFromLeft (100));
+    // One row: the panels use the full height; the strip menu is a thin bar of the same height at the right end,
+    // separated by the same gap as between panels.
+    dockMenuBar.setBounds (area.removeFromRight (dockMenuWidth));
+    area.removeFromRight (space::sm);
 
     titleArea = {};
     deltaArea = footerArea = readoutArea = {};
 
-    area.removeFromTop (space::xs);
     gridArea = area;
 
     const int count = getActiveSlotCount();

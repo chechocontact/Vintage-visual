@@ -21,7 +21,7 @@ namespace ui
 constexpr int minWidth = 560, minHeight = 300, maxWidth = 3000, maxHeight = 2000;
 constexpr int defaultWidth = 760, defaultHeight = 420;
 // DOCK strip: resizable in height, never smaller than the minimum.
-constexpr int dockMinHeight = 150, dockMaxHeight = 480, dockDefaultHeight = dockMinHeight;
+constexpr int dockMinHeight = 118, dockMaxHeight = 480, dockDefaultHeight = dockMinHeight;
 } // namespace ui
 
 class FloatingWindow;
